@@ -34,21 +34,16 @@ async fn main() -> io::Result<()> {
 
 async fn receiver(mut read_socket: OwnedReadHalf) {
     let mut buffer = [0u8; 1024];
-    loop {
-        let n = match read_socket.read(&mut buffer).await {
-            Err(_) => {
-                println!("Server disconnected.");
-                std::process::exit(1);
-            }
-            Ok(0) => {
-                println!("Server disconnected.");
-                std::process::exit(0);
-            }
-            Ok(n) => n,
-        };
-
-        let message = str::from_utf8(&buffer[..n]).unwrap();
+    while let Ok(n) = read_socket.read(&mut buffer).await {
+        if n == 0 {
+            break;
+        }
+        
+        let message = String::from_utf8_lossy(&buffer[..n]);
         print!("{}", message);
         io::stdout().flush().unwrap();
-    }
+    };
+
+    println!("Server disconnected.");
+    std::process::exit(0);
 }

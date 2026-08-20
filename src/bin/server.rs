@@ -1,7 +1,7 @@
 use rand::RngExt;
 use std::{collections::HashMap, io, net::SocketAddr};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
@@ -36,7 +36,7 @@ async fn server(mut receiver: UnboundedReceiver<ChatEvent>) {
                 println!("{sender_address} disconnected");
                 for channel in server.clients.values_mut() {
                     channel
-                        .send("Client disconnected\n".to_owned())
+                        .send(format!("{sender_address} disconnected\n"))
                         .unwrap_or_else(|e| eprintln!("Error: {e}"));
                 }
                 server
@@ -45,13 +45,12 @@ async fn server(mut receiver: UnboundedReceiver<ChatEvent>) {
             }
             ChatEvent::NewMessage(sender_address, message) => {
                 print!("{sender_address} says {message}");
-                for (client_address, channel) in &mut server.clients {
-                    if *client_address != sender_address {
-                        channel.send(message.clone()).unwrap_or_else(|e| {
-                            eprintln!("Error {e}");
-                        });
+                server.clients.retain(|client_address, channel| {
+                    if *client_address == sender_address {
+                        return true;
                     }
-                }
+                    channel.send(message.clone()).is_ok()
+                });
             }
         }
     }
@@ -98,18 +97,16 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn authenticate_client(socket: &mut TcpStream, token: u128) -> io::Result<()> {
+async fn authenticate_client(mut socket: &mut TcpStream, token: u128) -> io::Result<()> {
     const TOKEN_PROMPT: &[u8] = b"Enter server token: ";
 
     socket.write_all(TOKEN_PROMPT).await?;
 
-    let mut buffer = [0u8; 1024];
-    let n = socket.read(&mut buffer).await?;
+    let mut buf_reader = BufReader::new(&mut socket);
+    let mut line = String::new();
+    buf_reader.read_line(&mut line).await?;
 
-    let message =
-        str::from_utf8(&buffer[..n]).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let trimmed = message.trim_ascii();
-    let inputted_token = u128::from_str_radix(trimmed, 16)
+    let inputted_token = u128::from_str_radix(line.trim(), 16)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     if inputted_token != token {
@@ -124,7 +121,7 @@ async fn authenticate_client(socket: &mut TcpStream, token: u128) -> io::Result<
 
 async fn client(socket: TcpStream, sender: UnboundedSender<ChatEvent>) {
     let Ok(addr) = socket.peer_addr() else { return };
-    let (mut read_socket, mut write_socket) = socket.into_split();
+    let (read_socket, mut write_socket) = socket.into_split();
 
     let (write_return, mut read_return) = mpsc::unbounded_channel::<String>();
 
@@ -137,38 +134,27 @@ async fn client(socket: TcpStream, sender: UnboundedSender<ChatEvent>) {
 
     tokio::spawn(async move {
         while let Some(message) = read_return.recv().await {
-            write_socket
-                .write_all(message.as_bytes())
-                .await
-                .unwrap_or_else(|e| eprintln!("Error: {e}"));
+            if write_socket.write_all(message.as_bytes()).await.is_err() {
+                return;
+            }
         }
     });
 
-    let mut buffer = [0u8; 1024];
+    let mut buf_reader = BufReader::new(read_socket);
+
     loop {
-        let n = match read_socket.read(&mut buffer).await {
+        let mut line = String::new();
+        match buf_reader.read_line(&mut line).await {
             Ok(0) | Err(_) => {
                 if sender.send(ChatEvent::ClientDisconnected(addr)).is_err() {
                     return;
                 };
-                break;
+                return;
             }
-            Ok(n) => n,
+            _ => (),
         };
 
-        let message = str::from_utf8(&buffer[..n]).unwrap_or_else(|e| {
-            eprintln!("Error: {e}");
-            ""
-        });
-
-        if message.is_empty() {
-            continue;
-        }
-
-        if sender
-            .send(ChatEvent::NewMessage(addr, message.to_owned()))
-            .is_err()
-        {
+        if sender.send(ChatEvent::NewMessage(addr, line)).is_err() {
             return;
         }
     }
