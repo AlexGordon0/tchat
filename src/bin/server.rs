@@ -98,7 +98,7 @@ async fn main() -> io::Result<()> {
 }
 
 async fn authenticate_client(mut socket: &mut TcpStream, token: u128) -> io::Result<()> {
-    const TOKEN_PROMPT: &[u8] = b"Enter server token: ";
+    const TOKEN_PROMPT: &[u8] = b"Enter server token:\n";
 
     socket.write_all(TOKEN_PROMPT).await?;
 
